@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+chromadb
+sentence-transformers
+pypdf
+python-docx
+anthropic
+requests
+# Uncomment if you set LLM_PROVIDER=openai
+# openai
