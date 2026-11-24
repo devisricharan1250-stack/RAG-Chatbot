@@ -1,202 +1,128 @@
-# Margin — a RAG chat application (built from scratch)
+# Margin: Document Q&A with Retrieval-Augmented Generation
 
-Upload your documents, then ask questions and get answers grounded **only** in
-those documents, with sources. This repo contains the three pieces you asked for:
-a **frontend**, a **backend**, and the **RAG pipeline** itself.
+Margin is a chat app for asking questions about your own documents. Upload PDFs, Word files, text or Markdown, ask a question, and get an answer that is **grounded only in those documents**, with inline citations showing exactly which passages it used.
 
----
+I built the retrieval pipeline from scratch (chunking, embeddings, vector search and prompt construction) rather than using a framework like LangChain or LlamaIndex. I wanted to understand and control every step.
 
-## 1. What is RAG, in one minute
-
-A plain language model answers from memory and can make things up. **RAG
-(Retrieval-Augmented Generation)** fixes that by giving the model your documents
-to read *at question time*. It works in two phases:
-
-**Indexing (done once per document, when you upload):**
-
-```
-file → extract text → split into chunks → turn each chunk into a vector
-                                          → store vectors in a database
-```
-
-**Answering (done for every question):**
-
-```
-question → turn into a vector → find the most similar chunks
-        → put those chunks in a prompt → LLM writes an answer from them
-```
-
-A "vector" (or *embedding*) is just a list of numbers that captures meaning, so
-two pieces of text about the same thing land near each other. Finding relevant
-chunks = finding the nearest vectors.
+<!-- Add a screenshot or GIF of the app here, for example: ![Margin demo](docs/demo.gif) -->
 
 ---
 
-## 2. The stack (and why)
+## Features
 
-| Layer | Choice | Why |
+- **Grounded answers with citations.** Every answer carries `[1] [2]` citation chips, and a Sources panel shows the exact chunks used, with similarity scores.
+- **Says "I don't know".** The system prompt forbids answering beyond the retrieved context, so the model reports when the documents don't contain the answer instead of making one up.
+- **Multi-format ingestion.** Supports PDF, DOCX, TXT and MD.
+- **Local embeddings and vector store.** `sentence-transformers` and ChromaDB run on your machine, so documents are never sent to a third party for indexing.
+- **Provider-agnostic LLM layer.** Switch between Claude, OpenAI or a fully local Ollama model with one environment variable.
+- **REST API.** A FastAPI backend with auto-generated docs at `/docs`.
+
+---
+
+## How it works
+
+```
+INDEXING (on upload)
+file ──► extract text ──► overlapping chunks ──► embeddings (384-d) ──► ChromaDB
+
+ANSWERING (per question)
+question ──► embedding ──► top-k similar chunks ──► grounded prompt ──► LLM
+                                                                          │
+                                            answer + cited sources ◄──────┘
+```
+
+### Design decisions
+
+| Component | Choice | Why |
 |---|---|---|
-| Embeddings | `sentence-transformers` (all-MiniLM-L6-v2) | Free, runs locally, no API needed |
-| Vector DB | ChromaDB | Free, local, persists to disk, simple API |
-| Answer model | Claude API (swappable) | Best answer quality with near-zero setup |
-| Backend | FastAPI | Small, fast, automatic docs at `/docs` |
-| Frontend | One `index.html` | No build step, easy to read and change |
-
-The answer model is **swappable** — flip `LLM_PROVIDER` to `openai` or `ollama`
-(fully free + private) without touching any other code.
+| Chunking | Character windows with overlap (800 / 150) | Overlap keeps sentences that span a boundary retrievable from either side |
+| Embeddings | `all-MiniLM-L6-v2` | Fast, free, runs on CPU; swappable for `all-mpnet-base-v2` when higher recall matters more than speed |
+| Vector store | ChromaDB (persistent) | Local, persists to disk, no infrastructure to run |
+| Retrieval | Cosine-similarity top-k (k = 4) | A small k keeps prompts focused and cheap; it can be tuned per corpus |
+| Generation | Claude API behind an abstraction | Strong instruction-following for grounded answers; the abstraction allows OpenAI or Ollama as drop-in replacements |
+| Backend | FastAPI | Async, typed, free interactive API docs |
+| Frontend | A single `index.html` | No build step; the backend serves it directly |
 
 ---
 
-## 3. Project layout
+## Project structure
 
 ```
-rag-chat-app/
 ├── backend/
-│   ├── config.py        # all settings (env-overridable)
-│   ├── llm.py           # the swappable answer model (anthropic/openai/ollama)
-│   ├── ingest.py        # load → chunk → embed → store, and search
-│   ├── rag.py           # retrieve + build prompt + generate
-│   ├── main.py          # FastAPI server (the HTTP endpoints)
+│   ├── config.py         # Central settings, overridable via .env
+│   ├── ingest.py         # Load → chunk → embed → store; similarity search
+│   ├── rag.py            # Retrieve → build grounded prompt → generate → return sources
+│   ├── llm.py            # Provider-agnostic LLM interface (Anthropic / OpenAI / Ollama)
+│   ├── main.py           # FastAPI app and endpoints; serves the frontend
 │   ├── requirements.txt
 │   └── .env.example
-├── frontend/
-│   └── index.html       # the whole UI (chat + upload + sources)
-└── README.md
+└── frontend/
+    └── index.html        # Chat UI, document upload and sources panel
 ```
 
-### What each backend file does
+### API
 
-- **`config.py`** — one place for every setting. Reads from a `.env` file so you
-  never hard-code secrets.
-- **`ingest.py`** — the indexing half. `load_text()` reads PDF/DOCX/TXT/MD;
-  `chunk_text()` splits text into overlapping windows; `DocumentStore` holds the
-  embedding model + Chroma and exposes `add_document()` and `search()`.
-- **`rag.py`** — the answering half. `RAGPipeline.answer()` searches for the top
-  chunks, builds a grounded prompt (with a system instruction that forbids making
-  things up), calls the LLM, and returns the answer plus the sources used.
-- **`llm.py`** — isolates the model call so the rest of the app is
-  provider-agnostic.
-- **`main.py`** — exposes `/api/upload`, `/api/chat`, `/api/reset`, `/api/health`
-  and serves the frontend.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/upload` | Ingest a document (extract, chunk, embed, store) |
+| `POST` | `/api/chat` | Ask a question; returns the answer and its sources |
+| `POST` | `/api/reset` | Clear the vector index |
+| `GET` | `/api/health` | Health check |
 
 ---
 
-## 4. Setup
+## Quickstart
 
-You need **Python 3.10+**.
+Requires **Python 3.10+**.
 
 ```bash
-cd rag-chat-app/backend
+git clone https://github.com/devisricharan1250-stack/RAG-Chatbot.git
+cd RAG-Chatbot/backend
 
-# 1. create and activate a virtual environment
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt    # first run downloads the embedding model (~80 MB)
 
-# 2. install dependencies (first run downloads the embedding model, ~80 MB)
-pip install -r requirements.txt
-
-# 3. configure
-cp .env.example .env
-#   then open .env and paste your ANTHROPIC_API_KEY
-#   (get one at https://console.anthropic.com)
-```
-
-### Run it
-
-```bash
+cp .env.example .env               # then add your ANTHROPIC_API_KEY
 python main.py
 ```
 
-Open **http://127.0.0.1:8000** in your browser. The server also serves the
-frontend, so that's the only command you need. (You can also open
-`frontend/index.html` directly — it will call the server at `127.0.0.1:8000`.)
+Open **http://127.0.0.1:8000**. API docs are at **http://127.0.0.1:8000/docs**.
 
-Interactive API docs are at **http://127.0.0.1:8000/docs**.
+### Use a different model
 
----
-
-## 5. Using it
-
-1. Click **Add document** (or drag a file onto the page). Wait for the
-   "X chunks" confirmation.
-2. Type a question and press **Ask**.
-3. The answer appears with `[1] [2]` citation chips, and the **Sources** rail on
-   the right shows the exact chunks it used, with a similarity score.
-4. **Clear index** wipes everything to start fresh.
-
----
-
-## 6. Switching the answer model
-
-Edit `.env`:
-
-**OpenAI**
-```
+```env
+# OpenAI (also run: pip install openai)
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-4o-mini
 OPENAI_API_KEY=your-key
-```
-(then `pip install openai`)
 
-**Fully local & free with Ollama** — no API key, nothing leaves your machine:
-```
+# Fully local and free with Ollama (no API key; nothing leaves your machine)
 LLM_PROVIDER=ollama
 LLM_MODEL=llama3.1
 ```
-First install Ollama (ollama.com), then `ollama pull llama3.1` and make sure
-`ollama serve` is running.
+
+### Tuning
+
+| Setting | Default | Effect |
+|---|---|---|
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 800 / 150 chars | Smaller chunks give more precise retrieval but less context per hit |
+| `TOP_K` | 4 | More chunks give more context, but also more noise and cost |
+| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Use `all-mpnet-base-v2` for higher quality at lower speed |
 
 ---
 
-## 7. Tuning quality
+## Roadmap
 
-All in `.env` / `config.py`:
-
-- **`CHUNK_SIZE` / `CHUNK_OVERLAP`** — smaller chunks = more precise retrieval but
-  less context per chunk. 800 / 150 chars is a solid default.
-- **`TOP_K`** — how many chunks to feed the model. More = more context but more
-  noise and cost. 4 is a good start.
-- **`EMBEDDING_MODEL`** — `all-MiniLM-L6-v2` is fast; try `all-mpnet-base-v2` for
-  higher quality (slower).
+- [ ] Page-level source attribution (document name and page number)
+- [ ] Streaming responses
+- [ ] Conversation memory for follow-up questions
+- [ ] Hybrid search (BM25 + dense) with a reranker
+- [ ] Retrieval evaluation (recall@k, answer faithfulness) on a labelled question set
+- [ ] Hosted vector DB option (Qdrant / Pinecone) and per-user collections
 
 ---
 
-## 8. Troubleshooting
+## Tech stack
 
-- **"ANTHROPIC_API_KEY is not set"** — you didn't fill in `.env`, or didn't copy
-  it from `.env.example`.
-- **First request is slow** — the embedding model downloads and loads once; later
-  runs are fast.
-- **Answer says "I don't know based on the documents"** — that's the model being
-  honest because the answer wasn't in your chunks. Try rephrasing, raising
-  `TOP_K`, or adding the relevant document.
-- **Frontend can't reach the backend** — make sure the server is running on port
-  8000, or just open `http://127.0.0.1:8000` directly.
-
----
-
-## 9. Where to take it next
-
-- Show which document + page a chunk came from (add page numbers in `load_text`).
-- Stream the answer token-by-token for a live "typing" feel.
-- Add conversation memory so follow-up questions understand "it"/"that".
-- Swap Chroma for a hosted vector DB (Pinecone, Qdrant) when you outgrow local.
-- Add user accounts and per-user collections.
-
----
-
-## 10. The end-to-end flow, one more time
-
-```
-You upload report.pdf
-   → backend extracts text, makes ~40 overlapping chunks
-   → each chunk → 384-number vector → stored in Chroma
-
-You ask "What were Q3 revenues?"
-   → question → vector → Chroma returns the 4 closest chunks
-   → those chunks + your question → Claude
-   → Claude answers using only them, citing [1]..[4]
-   → you see the answer + the source chunks it leaned on
-```
-
-That's RAG.
+Python · FastAPI · ChromaDB · Sentence-Transformers · Claude API · OpenAI / Ollama (optional) · HTML/JS
